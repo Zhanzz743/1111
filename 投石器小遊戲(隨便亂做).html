@@ -1,0 +1,352 @@
+```html
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>投石器遊戲</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: Arial, sans-serif;
+            background-color: #f0f0f0;
+        }
+        #gameCanvas {
+            border: 2px solid #333;
+            margin: 20px;
+            background-color: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: white;
+            min-width: 300px;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .slider-container label {
+            width: 100px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .score-board {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <h1>投石器遊戲</h1>
+    <div class="score-board">
+        <h3>得分板</h3>
+        <div id="scores"></div>
+    </div>
+    <canvas id="gameCanvas" width="1400" height="800"></canvas>
+    <div id="setupControls" class="controls">
+        <h3>設置塔型 - 玩家<span id="playerNum">1</span></h3>
+        <div class="slider-container">
+            <label>寬度 (2-6):</label>
+            <input type="range" id="widthSlider" min="2" max="6" value="4" step="1">
+            <span id="widthValue">4</span>
+        </div>
+        <div class="slider-container">
+            <label>位置 (70-120):</label>
+            <input type="range" id="positionSlider" min="70" max="120" value="90" step="1">
+            <span id="positionValue">90</span>
+        </div>
+        <button id="confirmTower">確認</button>
+    </div>
+    <div id="gameControls" class="controls" style="display: none;">
+        <h3>玩家<span id="currentPlayer">1</span>回合</h3>
+        <div class="slider-container">
+            <label>角度 (0-90):</label>
+            <input type="range" id="angleSlider" min="0" max="90" value="45" step="1">
+            <span id="angleValue">45</span>
+        </div>
+        <div class="slider-container">
+            <label>力量 (1-50):</label>
+            <input type="range" id="powerSlider" min="1" max="50" value="25" step="1">
+            <span id="powerValue">25</span>
+        </div>
+        <button id="shoot">發射</button>
+    </div>
+
+    <script>
+        window.onload = function() {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            const SCALE = 8;
+            const TOWER_AREA = 60;
+            const MIN_GAP = 5;
+            const WALL_X = 50;
+            let players = [];
+            let playerScores = [0, 0, 0];
+            let wallHealth = 4;
+            let currentPlayer = 0;
+            let round = 0;
+
+            function updateScoreBoard() {
+                const scoresDiv = document.getElementById('scores');
+                scoresDiv.innerHTML = playerScores.map((score, i) => 
+                    `<div>玩家${i+1}: ${score}分</div>`
+                ).join('');
+            }
+
+            function calculateTrajectory(angle, power, gravity = 9.8) {
+                const rad = angle * Math.PI / 180;
+                const v0x = power * Math.cos(rad);
+                const v0y = power * Math.sin(rad);
+                const flightTime = (v0y + Math.sqrt(v0y**2 + 2*gravity*0)) / gravity;
+                const points = [];
+                
+                for(let t = 0; t <= flightTime; t += 0.1) {
+                    const x = v0x * t;
+                    const y = v0y * t - 0.5 * gravity * t**2;
+                    if(y >= 0) points.push({x, y});
+                }
+                return points;
+            }
+
+            function drawScene() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // 輔助線
+                const guideTrajectory = calculateTrajectory(45, 25);
+                ctx.beginPath();
+                ctx.strokeStyle = 'rgba(128, 128, 128, 0.3)';
+                ctx.setLineDash([5, 5]);
+                guideTrajectory.forEach((point, i) => {
+                    const x = point.x * SCALE;
+                    const y = canvas.height - point.y * SCALE;
+                    if(i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // 城牆
+                const maxHeight = Math.max(...players.map(p => p.height || 0), 12);
+                const wallMaxHeight = maxHeight - 2;
+                const layerHeights = [1,2,3,4].map(n => wallMaxHeight * n / 10);
+                const layerWidths = [1,2,3,4].map(n => 4 * n / 4);
+                let heightSum = 0;
+
+                // 底層永遠存在
+                ctx.fillStyle = '#E0E0E0';
+                ctx.fillRect(
+                    (WALL_X - layerWidths[3]/2) * SCALE,
+                    canvas.height - (heightSum + layerHeights[3]) * SCALE,
+                    layerWidths[3] * SCALE,
+                    layerHeights[3] * SCALE
+                );
+                heightSum += layerHeights[3];
+
+                if(wallHealth > 1) {
+                    for(let i = 2; i >= 0; i--) {
+                        if(wallHealth >= 4-i) {
+                            ctx.fillStyle = ['#404040', '#808080', '#C0C0C0'][i];
+                            ctx.fillRect(
+                                (WALL_X - layerWidths[i]/2) * SCALE,
+                                canvas.height - (heightSum + layerHeights[i]) * SCALE,
+                                layerWidths[i] * SCALE,
+                                layerHeights[i] * SCALE
+                            );
+                            heightSum += layerHeights[i];
+                        }
+                    }
+                }
+
+                // 玩家塔
+                players.forEach((player, i) => {
+                    if(player.health > 0) {
+                        ctx.fillStyle = player.color;
+                        ctx.fillRect(
+                            (player.x - player.width/2) * SCALE,
+                            canvas.height - player.height * SCALE,
+                            player.width * SCALE,
+                            player.height * SCALE
+                        );
+                        ctx.fillStyle = 'black';
+                        ctx.font = '14px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(
+                            `P${i+1}:HP${player.health}`,
+                            player.x * SCALE,
+                            canvas.height - (player.height + 1) * SCALE
+                        );
+                    }
+                });
+            }
+
+            function checkWallCollision(trajectory) {
+                for(let point of trajectory) {
+                    if(point.x >= WALL_X - 2 && point.x <= WALL_X + 2 && point.y <= 12) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            function checkTowerHits(trajectory, currentPlayer) {
+                const hits = [];
+                for(let point of trajectory) {
+                    players.forEach((player, i) => {
+                        if(player.health > 0) {
+                            if(point.x >= player.x - player.width/2 &&
+                               point.x <= player.x + player.width/2 &&
+                               point.y <= player.height) {
+                                if(!hits.includes(i)) hits.push(i);
+                            }
+                        }
+                    });
+                }
+                return hits;
+            }
+
+            document.querySelectorAll('input[type="range"]').forEach(slider => {
+                slider.addEventListener('input', function() {
+                    document.getElementById(this.id.replace('Slider', 'Value')).textContent = this.value;
+                });
+            });
+
+            document.getElementById('confirmTower').addEventListener('click', function() {
+                const width = parseInt(document.getElementById('widthSlider').value);
+                const position = parseInt(document.getElementById('positionSlider').value);
+                const height = TOWER_AREA / width;
+                
+                let finalPosition = position;
+                for(let i = 0; i < players.length; i++) {
+                    const gap = Math.abs(finalPosition - players[i].x) - 
+                              (width/2 + players[i].width/2);
+                    if(gap < MIN_GAP) {
+                        finalPosition = players[i].x + width/2 + players[i].width/2 + 
+                                      MIN_GAP + Math.random() * 5;
+                    }
+                }
+
+                if(finalPosition <= 120) {
+                    players.push({
+                        width,
+                        height,
+                        x: finalPosition,
+                        health: 3,
+                        color: ['red', 'blue', 'green'][players.length]
+                    });
+
+                    if(players.length === 3) {
+                        document.getElementById('setupControls').style.display = 'none';
+                        document.getElementById('gameControls').style.display = 'flex';
+                    } else {
+                        document.getElementById('playerNum').textContent = players.length + 1;
+                    }
+                    drawScene();
+                } else {
+                    alert('無法找到合適的位置，請重新選擇。');
+                }
+            });
+
+            document.getElementById('shoot').addEventListener('click', function() {
+                const angle = parseInt(document.getElementById('angleSlider').value);
+                const power = parseInt(document.getElementById('powerSlider').value);
+                const trajectory = calculateTrajectory(angle, power);
+
+                ctx.beginPath();
+                ctx.strokeStyle = players[currentPlayer].color;
+                ctx.lineWidth = 2;
+                trajectory.forEach((point, i) => {
+                    const x = point.x * SCALE;
+                    const y = canvas.height - point.y * SCALE;
+                    if(i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.stroke();
+                ctx.lineWidth = 1;
+
+                if(wallHealth > 1 && checkWallCollision(trajectory)) {
+                    wallHealth--;
+                    playerScores[currentPlayer] += 1;
+                    alert(`擊中城牆！城牆強度降至 ${wallHealth}\n玩家${currentPlayer+1}得1分！`);
+                } else {
+                    const hits = checkTowerHits(trajectory, currentPlayer);
+                    hits.forEach(hit => {
+                        players[hit].health--;
+                        if(hit === currentPlayer) {
+                            playerScores[currentPlayer] -= 2;
+                            alert(`打到自己的塔！扣2分！`);
+                        } else {
+                            playerScores[currentPlayer] += 3;
+                            alert(`命中玩家${hit+1}的塔！得3分！`);
+                        }
+                        if(players[hit].health <= 0) {
+                            alert(`玩家${hit+1}的塔被摧毀！`);
+                        }
+                    });
+                    if(hits.length === 0 && Math.max(...trajectory.map(p => p.x)) >= WALL_X) {
+                        alert('未命中任何目標。');
+                    }
+                }
+
+                updateScoreBoard();
+                currentPlayer = (currentPlayer + 1) % 3;
+                round++;
+                document.getElementById('currentPlayer').textContent = currentPlayer + 1;
+
+                if(round >= 15 || players.filter(p => p.health > 0).length <= 1) {
+                    const maxScore = Math.max(...playerScores);
+                    const winners = playerScores
+                        .map((score, index) => ({score, index}))
+                        .filter(p => p.score === maxScore);
+                    
+                    let resultMessage = "遊戲結束！\n\n";
+                    playerScores.forEach((score, i) => {
+                        resultMessage += `玩家${i+1}：${score}分\n`;
+                    });
+                    resultMessage += "\n";
+                    
+                    if(winners.length > 1) {
+                        resultMessage += `平手！玩家${winners.map(w => w.index + 1).join("、")}並列第一`;
+                    } else {
+                        resultMessage += `玩家${winners[0].index + 1}獲勝！`;
+                    }
+                    
+                    alert(resultMessage);
+                }
+
+                setTimeout(() => {
+                    drawScene();
+                }, 500);
+            });
+
+            // 初始化遊戲
+            drawScene();
+            updateScoreBoard();
+        };
+    </script>
+</body>
+</html>
+```
